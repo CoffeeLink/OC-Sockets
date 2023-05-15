@@ -3,90 +3,101 @@ local event = require("event")
 local computer = require("computer")
 local modem = component.modem
 
-local Socket = {
-    selfPort = 0, -- port of the socket
-    connectedPort = 0, -- port of the connected socket
+TCP = "TCP"
+UDP = "UDP"
 
-    localAddress = "", -- address of the socket
-    remoteAddress = "", -- connected to address
+Socket = {
+    -- Socket
+    modem = modem,
 
-    state = "closed", -- closed, open, connecting, connected, listening
-    protocol = "Generic Socket" -- protocol/purpose of the socket
+    localAddress = nil,
+    localPort = nil,
 
+    remoteAddress = nil,
+    remotePort = nil,
+
+    -- Socket options
+    protocol = nil, -- TCP or UDP
+    name = "Generic Network Device", -- Socket name
+
+    timeout = 3, -- Timeout in seconds
+    keepAlive = 12, -- Keep alive in seconds
+    enableArpAdvert = false, -- Enable ARP advertisement
+
+    -- Socket state
+    state = "CLOSED", -- states: CLOSED, OPEN, LISTENING, CONNECTING, CONNECTED, CLOSING
+    isOpen = false,
+
+    -- Socket data
+    acceptQueue = {}, -- Queue of sockets waiting to be accepted
+    receiveData = {}, -- Queue of packets waiting to be fully received used by the internal sendall, recvAll functions
 }
 
-function findFreePort() -- finds a free port to use
-    local port = tonumber(math.random(1, 65535))
-    local port = math.floor(port)
-    if modem.isOpen(port) then
-        return findFreePort()
-    else
-        return port
-    end
-end
-
-function Socket:new() -- create a new socket
+function Socket:new(protocol, modem, descriptor)
     local o = {}
     setmetatable(o, self)
     self.__index = self
-    self.address = modem.address
-    self.port = findFreePort()
+    self.modem = modem
+    self.name = descriptor
+    self.protocol = protocol
+
+    self.localAddress = modem.address
+    self.localPort = self:getFreePort()
+
     return o
 end
 
-function Socket:connect(address, port) -- connect to a socket
-    self.state = "connecting"
-    modem.send(address, port, "socket_connect_request")
-    local _, _, from, port, _, message = event.pull("modem_message")
-    if message == "socket_connect_accept" then
-        self.address = from
-        self.port = port
+function Socket:getFreePort()
+    local port = math.random(1, 65535)
+    while self.modem.isOpen(port) do
+        port = math.random(1, 65535)
+    end
+    return port    
+end
+
+function Socket:bind(port)
+    if self.modem.isOpen(port) then
+        return false
+    end
+    self.localPort = port
+    self.modem.open(port)
+    self.state = "OPEN"
+    self.isOpen = true
+end
+
+function Socket:open()
+    if self.isOpen then
         return true
-    else
-        return false
-    end
-end
-
-function Socket:openFreePort()
-    self.port = findFreePort()
-    modem.open(self.port)
-end
-
-function Socket:bind(port) -- binds the socket to a port (opens the socket)
-    if modem.isOpen(port) then -- if the port is already open, return false and do nothing
-        return false
     end
 
-    self.port = port
-    self.address = modem.address
-    self.state = "open"
-    modem.open(port)
-    return true
-
+    self:bind(self:getFreePort())
 end
 
-function Socket:close() -- closes the socket
-    modem.close(self.port)
-    self.state = "closed"
+function Socket:close()
+    --TODO add a function that tells TCP clients or servers that im closing
+    self.state = "CLOSING"
+    --onclose balh blah blah
+    self.modem.close(self.localPort)
+    self.localPort = nil
+    self.isOpen = false
+    self.state = "CLOSED"
 end
 
-function Socket:_send(address, port, message) -- sends a message to a socket
-    self.openFreePort()
-    self.state = "open"
-    modem.send(address, port, message)
+function Socket:_createPacket(data)
+    local packet = {
+        protocol = self.protocol,
+        returnPort = self.localPort,
+        data = data,
+    }
+    return packet
 end
 
-function Socket:_recv(address, port)
-    local recived = false
-    while not recived do
-        local _, _, from, port, _, message = event.pull("modem_message")
-        if from == address and port == port then
-            recived = true
-            return message
-        end
-    end
+function Socket:SendRaw(packet)
+    
 end
 
-function Socket:send(message) -- sends a message to the connected socket
-    self:_send(self.remoteAddress, self.connectedPort, message)
+function Socket:getAllDevices()
+    -- sends ARP request, waits until ARP timeout, takes all devices
+    -- the event that its looking for extends the timeout timer each time it gets a response, sets to ARP timeout
+    -- returns a table of devices
 end
