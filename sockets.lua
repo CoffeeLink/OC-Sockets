@@ -64,6 +64,37 @@ function Payload:deserialize(data)
     return Payload:new(data.protocol, data.sourceAddress, data.destinationAddress, data.sourcePort, data.destinationPort, data.dataType, data.data)
 end
 
+local SegmentData = {
+    packetID = nil,
+    segmentID = nil,
+    segmentCount = nil,
+    data = nil,
+    ack = false
+}
+
+function SegmentData:new(packetID, segmentID, segmentCount, ack, data)
+    local o = {}
+    setmetatable(o, self)
+    self.__index = self
+
+    self.packetID = packetID
+    self.segmentID = segmentID
+    self.segmentCount = segmentCount
+    self.ack = ack
+    self.data = data
+end
+
+function SegmentData:toTable()
+    local t = {
+        packetID = self.packetID,
+        segmentID = self.segmentID,
+        segmentCount = self.segmentCount,
+        ack = self.ack,
+        data = self.data
+    }
+    return t
+end
+
 local Socket = {
     -- Socket Variables
     protocol = nil,
@@ -83,7 +114,8 @@ local Socket = {
     description = "Generic Network Socket", -- the description of the socket
 
     --tcp stuff
-    recivedData = {}, -- struct {packetID = {address, port, data = {seq = {data} ...}} ...}
+    recivedSegmentData = {}, -- struct: {packetID:payload, ..}
+    recivedData = {}, -- sturct: {payload, payload, ...}
     lastPacketID = 0,
     
     -- server side
@@ -102,6 +134,7 @@ local Socket = {
     -- TCP
     tcpAckTimeout = 5, -- the timeout for the ack of a packet
     tcpAckTimer = nil, -- the timer for the ack of a packet
+    tcpAckResendLimit = 2,  -- the amount of times the socket will resend a packet before closing the connection
 
     connectionTimeout = 5, -- the timeout for the connection
     connectionTimer = nil, -- the timer for the connection
@@ -170,9 +203,63 @@ function Socket:findFreePort()
     return port  
 end
 
-function Socket:on_recive(_, targetAddress, senderAddress, port, distance, message)
-    -- check if the message is a SDP request, then check protocols and do the right thing :D
+function Socket:sendRaw(address, port, protocol, dataType, data)
+    local packet = Payload:new(protocol, self.localAddress, address, self.localPort, port, dataType, data)
+    self.modem.send(address, port, packet:serialize())
 end
+
+function Socket:sendto(address, port, data)
+    if self.state == "closed" then
+        self:open(self:findFreePort())
+    end
+    
+    if self.protocol == TCP then
+        if not self.connected then
+            error("Socket is not connected")
+        end
+        self:sendRaw(address, port, self.protocol, "data", nil, data)
+    end
+    self:sendRaw(address, port, self.protocol, "data", nil, data)
+end
+
+
+function Socket:on_recive(_, targetAddress, senderAddress, port, distance, message)
+    if pcall(serializer.unserialize(message)) == false then
+        return
+    end
+    local packet = Payload:deserialize(message)
+    if packet.destinationAddress ~= self.localAddress then
+        return
+    end
+    if packet.destinationPort ~= self.localPort then
+        return
+    end
+    if packet.protocol ~= self.protocol then
+        return
+    end
+
+    if packet.packetType == "Generic" then
+        print(packet)
+    end
+
+    if packet.packetType == "segment_init" then
+        self:_handleSegmentInit(packet)
+    end
+    if packet.packetType == "segment_data" then
+        --segment data arived YIPPIE
+    end
+end
+
+function Socket:_handleSegmentInit(packet)
+    self.lastPacketID = self.lastPacketID + 1
+    self.recivedSegmentData[self.lastPacketID] = packet
+    self:sendRaw(packet.sourceAddress, packet.sourcePort, self.protocol, "segment_init_ack", self.lastPacketID)
+end
+
+function Socket:_handleSegmentData(packet)
+    --nice
+end
+
 
 -- return the module
 return {
