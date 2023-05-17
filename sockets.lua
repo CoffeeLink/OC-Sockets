@@ -180,6 +180,9 @@ function Socket:open(port)
     self.localPort = port
     self.modem.open(port)
     self.state = "open"
+
+    event.listen("modem_message", Socket.on_recive)
+
 end
 
 function Socket:close()
@@ -193,6 +196,8 @@ function Socket:close()
     self.connected = false
     self.remoteAddress = nil
     self.remotePort = nil
+
+    event.ignore("modem_message", Socket.on_recive)
 end
 
 function Socket:findFreePort()
@@ -208,22 +213,8 @@ function Socket:sendRaw(address, port, protocol, dataType, data)
     self.modem.send(address, port, packet:serialize())
 end
 
-function Socket:sendto(address, port, data)
-    if self.state == "closed" then
-        self:open(self:findFreePort())
-    end
-    
-    if self.protocol == TCP then
-        if not self.connected then
-            error("Socket is not connected")
-        end
-        self:sendRaw(address, port, self.protocol, "data", nil, data)
-    end
-    self:sendRaw(address, port, self.protocol, "data", nil, data)
-end
-
-
 function Socket:on_recive(_, targetAddress, senderAddress, port, distance, message)
+    -- checking if the message is a valid payload
     if pcall(serializer.unserialize(message)) == false then
         return
     end
@@ -238,18 +229,94 @@ function Socket:on_recive(_, targetAddress, senderAddress, port, distance, messa
         return
     end
 
-    if packet.packetType == "Generic" then
-        print(packet)
+    --packet proccessing
+
+    if packet.packetType == "generic" then
+        table.insert(self.recivedData, packet)
+        self:sendRaw(packet.sourceAddress, packet.sourcePort, self.protocol, "generic_ack", packet.packetID)
     end
 
     if packet.packetType == "segment_init" then
         self:_handleSegmentInit(packet)
     end
     if packet.packetType == "segment_data" then
-        --segment data arived YIPPIE
+        self:_handleSegmentData(packet)
     end
 end
 
+--communication functions
+function Socket:recvFrom() -- recive data from the socket (blocking) (returns from, port, data)
+    while true do
+        if self.recivedData[1] ~= nil then
+            local packet = self.recivedData[1]
+            table.remove(self.recivedData, 1)
+            return packet.sourceAddress, packet.sourcePort, packet.data -- return from, port, data
+        end
+        -- os.sleep(0.05)
+    end
+end
+
+function Socket:recv() -- recive data from the socket (blocking) (returns data)
+    while true do
+        if self.recivedData[1] ~= nil then
+            local packet = self.recivedData[1]
+            table.remove(self.recivedData, 1)
+            return packet.data -- return data
+        end
+        -- os.sleep(0.05)
+    end
+end
+
+function Socket:send(data) -- send data to the socket
+    if self.state == "closed" then
+        self:open(self:findFreePort())
+    end
+
+    if self.protocol ~= TCP then
+        error("Socket is not TCP")
+    end
+
+    if not self.connected then
+        error("Socket is not connected")
+    end
+
+    self:sendRaw(self.remoteAddress, self.remotePort, self.protocol, "generic", data)
+    if self:getAck("generic_ack", self.ackTimeout) == nil then
+        error("Failed to send data")
+    end
+
+    return true
+end
+
+function Socket:sendto(address, port, data)
+    if self.state == "closed" then
+        self:open(self:findFreePort())
+    end
+    
+    if self.protocol == TCP then
+        error("Socket is TCP")
+    end
+
+    self:sendRaw(address, port, self.protocol, "data", nil, data)
+end
+
+function Socket:getAck(ack, timeout) -- get ack for a packet
+    --loop over all recived packets and if the packet
+    local timer = computer.uptime() + timeout
+
+    while timer > computer.uptime() do -- loop until timeout
+        for i, packet in ipairs(self.recivedData) do -- loop over all recived packets
+            if packet.packetType == ack then -- if the packet is the ack
+                table.remove(self.recivedData, i) -- remove the packet from the recivedData table
+                return packet -- return the packet
+            end
+        end
+        -- os.sleep(0.05) -- sleep for 0.05 seconds to not use all the cpu
+    end
+    return nil
+end
+
+-- packet handlers
 function Socket:_handleSegmentInit(packet)
     self.lastPacketID = self.lastPacketID + 1
     self.recivedSegmentData[self.lastPacketID] = packet
@@ -257,9 +324,23 @@ function Socket:_handleSegmentInit(packet)
 end
 
 function Socket:_handleSegmentData(packet)
-    --nice
-end
+    if self.recivedSegmentData[packet.data.packetID] == nil then -- if the packet is not in the recivedSegmentData table add it
+        self.recivedSegmentData[packet.data.packetID] = {packet}
+    else
+        self.recivedSegmentData[packet.data.packetID].data.data = self.recivedSegmentData[packet.data.packetID].data.data .. packet.data.data -- i know this is spaghetti af but it works so i dont care (expl: the data of the packet gets added to the data of the pervious packet)
+        self.recivedSegmentData[packet.data.packetID].data.segmentID = packet.data.segmentID -- update the segmentID to latest
+    end
 
+    self:sendRaw(packet.sourceAddress, packet.sourcePort, self.protocol, "segment_data_ack", packet.data.segmentID)
+
+    if packet.data.segmentID == packet.data.segmentCount then -- if the segment is the last one
+        packet.packetType = "generic"
+        packet.data = self.recivedSegmentData[packet.data.packetID].data.data
+
+        table.insert(self.recivedData, packet) -- add the data to the recivedData table
+        self.recivedSegmentData[packet.data.packetID] = nil -- remove the packet from the recivedSegmentData table
+    end
+end
 
 -- return the module
 return {
