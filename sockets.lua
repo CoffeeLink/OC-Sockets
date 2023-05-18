@@ -10,342 +10,449 @@ local computer = require("computer")
 local serializer = require("serialization")
 local ModemComp = component.modem
 
+-- devTasks
+-- to-do: finnis all methods with -- finnis tag
 
--- Static Variables
-TCP = "TCP"
-UDP = "UDP"
+-- socket types
+local SERVER = 0  -- set the socket as a server
+local CLIENT = 1 -- set the socket as a client
+local SERVER_CONNECTION = 3 -- [Read Dev Docs before use] set the socket as a server connection
 
--- the payload
-local Payload = {
-    protocol = nil, -- TCP or UDP
+-- socket states
+local CLOSED = 0 -- the socket is closed
+local OPEN = 1 -- the socket is open
+local CONNECTING = 2 -- the socket is connecting
+local CONNECTED = 3 -- the socket is connected
+local LISTENING = 4 -- the socket is listening
 
-    sourceAddress = nil, -- the address of the sender
-    destinationAddress = nil, -- the address of the receiver
+-- socket data types
 
-    sourcePort = nil, -- the port of the sender
-    destinationPort = nil, -- the port of the receiver
+local ACK = 0 -- the socket data is an ack packet
+local PACKET = 1 -- the socket data is a packet
 
-    dataType = nil, -- the type of data
-    data = nil,
+local SOCK_CONNECT_REQUEST = 2 -- the socket data is a socket connect request packet
+local SOCK_CONNECT_RESPONSE = 3 -- the socket data is a socket connect response packet
+
+local SOCK_CLOSE = 4 -- the socket data is a socket close packet
+
+local SEGMENT_DATA = 5 -- the socket data is a segment
+local SEGMENT_INIT = 6 -- the socket data is a segment init packet
+local SEGMENT_ACK = 7 -- the socket data is a segment ack packet
+
+local SDP_REQUEST = 8 -- the socket data is a sdp request packet
+local SDP_RESPONSE = 9 -- the socket data is a sdp response packet
+
+-- ack types
+local CONNECT_REQUEST_ACK = 0 -- the ack is a connect request ack
+local CONNECT_ACCEPT = 1 -- the ack is a connect accept ack
+local CONNECT_DENY = 2 -- the ack is a connect deny ack
+local CONNECT_TIMEOUT = 3 -- the ack is a connect timeout ack
+
+-- classes
+-- Segment class
+local Segment = {
+    -- segment variables
+    segmentID = nil, -- the segment id of the segment
+    segmentCount = nil, -- number of segments in the packet
+    ack = false, -- tells the reciver to send an ack packet
+    data = nil, -- the data of the segment
 }
+Segment.__index = Segment
 
-function Payload:new(protocol, sourceAddress, destinationAddress, sourcePort, destinationPort, dataType, data)
-    -- basic constructor stuff
-    local o = {}
-    setmetatable(o, self)
-    self.__index = self
-    -- setting Variables
-    self.protocol = protocol
-    self.sourceAddress = sourceAddress
-    self.destinationAddress = destinationAddress
-    self.sourcePort = sourcePort
-    self.destinationPort = destinationPort
-    self.dataType = dataType
-    self.data = data
-    -- returning the object
-    return o
+-- Segment constructors -------------------------------------------
+function Segment.new(segmentID, segmentCount, ack, data)
+    local inst = setmetatable({}, Segment)
+    inst.segmentID = segmentID
+    inst.segmentCount = segmentCount
+    inst.ack = ack
+    inst.data = data
+
+    return inst
+end
+    
+-- Segment methods -------------------------------------------
+function Segment:toTable()
+    return {segmentID = self.segmentID, segmentCount = self.segmentCount, ack = self.ack, data = self.data}
 end
 
-function Payload:serialize()
-    local data = {
-        protocol = self.protocol,
-        sourceAddress = self.sourceAddress,
-        destinationAddress = self.destinationAddress,
-        sourcePort = self.sourcePort,
-        destinationPort = self.destinationPort,
+-- Packet class
+local Packet = {
+    -- packet variables
+    payloadID = nil, -- the payload id of the packet
+    senderAddress = nil, -- the sender address of the packet
+    senderPort = nil, -- the sender port of the packet
+    targetAddress = nil, -- the target address of the packet
+    targetPort = nil, -- the target port of the packet
+    dataType = nil, -- the data type of the packet
+    data = nil, -- the data of the packet
+}
+Packet.__index = Packet
+
+-- Packet constructors -------------------------------------------
+
+function Packet.new(payloadID, senderAddr, senderPort, targetAddr, targetPort, dataType, data)
+    local inst = setmetatable({}, Packet)
+    inst.payloadID = payloadID
+    inst.senderAddress = senderAddr
+    inst.senderPort = senderPort
+    inst.targetAddress = targetAddr
+    inst.targetPort = targetPort
+    inst.dataType = dataType
+    inst.data = data
+
+    return inst
+end
+
+function Packet.fromMessage(message)
+    local packet = serializer.unserialize(message)
+    return Packet.new(packet.payloadID, packet.senderAddress, packet.senderPort, packet.targetAddress, packet.targetPort, packet.dataType, packet.data)
+end
+
+-- Packet methods -------------------------------------------
+function Packet:toMessage()
+    local t = {
+        payloadID = self.payloadID,
+        senderAddress = self.senderAddress,
+        senderPort = self.senderPort,
+        targetAddress = self.targetAddress,
+        targetPort = self.targetPort,
         dataType = self.dataType,
         data = self.data
     }
-    return serializer.serialize(data)
+    return serializer.serialize(t)
 end
 
-function Payload:deserialize(data)
-    local data = serializer.unserialize(data)
-    return Payload:new(data.protocol, data.sourceAddress, data.destinationAddress, data.sourcePort, data.destinationPort, data.dataType, data.data)
-end
-
-local SegmentData = {
-    packetID = nil,
-    segmentID = nil,
-    segmentCount = nil,
-    data = nil,
-    ack = false
-}
-
-function SegmentData:new(packetID, segmentID, segmentCount, ack, data)
-    local o = {}
-    setmetatable(o, self)
-    self.__index = self
-
-    self.packetID = packetID
-    self.segmentID = segmentID
-    self.segmentCount = segmentCount
-    self.ack = ack
-    self.data = data
-end
-
-function SegmentData:toTable()
-    local t = {
-        packetID = self.packetID,
-        segmentID = self.segmentID,
-        segmentCount = self.segmentCount,
-        ack = self.ack,
-        data = self.data
-    }
-    return t
-end
-
+-- Socket class
 local Socket = {
-    -- Socket Variables
-    protocol = nil,
-    state = nil,
+    -- static variables
+    CLIENT = CLIENT,
+    SERVER = SERVER,
+    SERVER_CONNECTION = SERVER_CONNECTION,
 
-    localAddress = nil,
-    localPort = nil,
+    -- socket variables
+    SocketType = nil, -- the type of the socket
+    modem = nil, -- the modem component of the socket
+    name = nil, -- the description of the socket
+    state = nil, -- the state of the socket (open, closed, connecting, connected, listening, etc.)
 
-    remoteAddress = nil,
-    remotePort = nil,
+    localAddress = nil, -- the local address of the socket
+    localPort = nil, -- the local port of the socket
 
-    modem = nil, -- the modem component
+    remoteAddress = nil, -- the remote address of the socket
+    remotePort = nil, -- the remote port of the socket
 
-    -- SDP Variables (Socket Discovery Protocol)
-    sdpAdvertEnabled = true,
-    sdpKnownSockets = {}, -- the known sockets sturcture: {address = {port = {protocol, description}, ...}, ...}
-    description = "Generic Network Socket", -- the description of the socket
+    -- payload variables
+    lastPayloadID = 0, -- the last payload id of the socket
+    recivedSegments = {}, -- the recived segments of the socket struct: {payloadID = {packet}, payloadID = {packet}, ...}
+    recivedData = {}, -- the recived data of the socket struct: {packet, packet, packet, ...} (a list of yet to be recived packets)
 
-    --tcp stuff
-    recivedSegmentData = {}, -- struct: {packetID:payload, ..}
-    recivedData = {}, -- sturct: {payload, payload, ...}
-    lastPacketID = 0,
+    -- server variables
+    connections = {}, -- the connections of the server socket structure: {Socket, Socket, Socket, ...}
+    connectionQueue = {}, -- the connection queue of the server socket structure: {Socket, Socket, Socket, ...}
+    connectionQueueSize = 0, -- the connection queue size of the server socket
+
+    parent = nil, -- the parent of the client connection (the server socket)
+
+    -- client variables
+    connected = false, -- the connection status of the client socket
     
-    -- server side
-    server = false,
-    serverConnections = {}, -- struct {address = {port = {socket}, ...}, ...}
-    serverConnectionQueue = {}, -- struct {address = {port = {socket}, ...}, ...}
 
-    -- client side
-    connected = false,
-
-    -- timeouts and timers
-    -- SDP
-    sdpResponseTimeout = 5, -- the timeout for the response of a SDP request
-    sdpResponseTimer = nil, -- the timer for the response of a SDP request
-
-    -- TCP
-    tcpAckTimeout = 5, -- the timeout for the ack of a packet
-    tcpAckTimer = nil, -- the timer for the ack of a packet
-    tcpAckResendLimit = 2,  -- the amount of times the socket will resend a packet before closing the connection
-
-    connectionTimeout = 5, -- the timeout for the connection
-    connectionTimer = nil, -- the timer for the connection
-
+    -- built in protocol variables
+    sdpAdvertEnabled = false, -- the sdp advert status of the socket
+    sdpData = {} -- the sdp data of the socket struct: {{address, port, name, type}, {address, port, name, type}, ...}
 }
+Socket.__index = Socket
 
-function Socket:new(protocol, description, modem) -- constructor
-    local o = {}
-    setmetatable(o, self)
-    self.__index = self
-    -- setting variables
-    self.protocol = protocol
-    self.description = description or self.description
-    self.modem = modem or ModemComp
-    -- checking if the modem is present
-    if self.modem == nil then -- if there is no modem component
-        error("Could not find a modem component")
-    end
-    -- returning the object
-    return o
+
+
+-- Socket constructors -------------------------------------------
+function Socket.new(socketType, name, modem)
+    local inst = setmetatable({}, Socket)
+    inst.SocketType = socketType
+    inst.name = name or "Generic Socket Object"
+    inst.modem = modem or ModemComp
+    inst.localAddress = inst.modem.address
+
+    inst.state = CLOSED
+
+    return inst
 end
 
-function Socket:open(port)
-    if self.modem.isOpen(port) then -- if the port is already open by another socket throw an error
-        error("Port is already open")
-    end
+function Socket.asConnection(parent, remoteAddr, remotePort)
+    local inst = setmetatable({}, Socket)
+    inst.SocketType = SERVER_CONNECTION
+    inst.parent = parent
+    inst.modem = parent.modem
+    inst.localAddress = parent.localAddress
+    inst.localPort = parent.localPort
+    inst.remoteAddress = remoteAddr
+    inst.remotePort = remotePort
+    inst.state = CONNECTING
 
-    if self.state == "open" then -- if the socket is already open, close current port and open new one
-        if self.protocol == TCP and self.connected then -- if the socket is connected and TCP
-            error("Can't change port while connected")
-        end
-
-        if self.protocol == TCP and self.server then -- if the socket is a server
-            error("Can't change port while server is running")
-        end
-
-        self.modem.close(self.localPort)
-        self.localPort = port
-        self.modem.open(port)
-        return
-    end
-    
-    self.localPort = port
-    self.modem.open(port)
-    self.state = "open"
-
-    event.listen("modem_message", Socket.on_recive)
-
+    return inst
 end
 
-function Socket:close()
-    if self.state == "closed" then -- if the socket is already closed
-        error("Socket is already closed")
-    end
-    self.modem.close(self.localPort)
-    self.state = "closed"
-    self.localPort = nil
+-- Socket methods -------------------------------------------
 
-    self.connected = false
-    self.remoteAddress = nil
-    self.remotePort = nil
-
-    event.ignore("modem_message", Socket.on_recive)
-end
-
-function Socket:findFreePort()
+function Socket:findFreePort() -- find a free port returns a port that if free
     local port = math.random(1, 65535)
     while self.modem.isOpen(port) do
         port = math.random(1, 65535)
     end
-    return port  
+    return port
 end
 
-function Socket:sendRaw(address, port, protocol, dataType, data)
-    local packet = Payload:new(protocol, self.localAddress, address, self.localPort, port, dataType, data)
-    self.modem.send(address, port, packet:serialize())
-end
-
-function Socket:on_recive(_, targetAddress, senderAddress, port, distance, message)
-    -- checking if the message is a valid payload
-    if pcall(serializer.unserialize(message)) == false then
-        return
+function Socket:open(port) -- open the socket on a port
+    if self.state == CLOSED then
+        self.localPort = port or self:findFreePort()
+        self.modem.open(self.localPort)
+        self.state = OPEN
+    elseif self.state == OPEN then
+        self.modem.close(self.localPort)
+        self.localPort = port or self:findFreePort()
+        self.modem.open(self.localPort)
+    else
+        error("Socket is connected or has connections")
     end
-    local packet = Payload:deserialize(message)
-    if packet.destinationAddress ~= self.localAddress then
-        return
-    end
-    if packet.destinationPort ~= self.localPort then
-        return
-    end
-    if packet.protocol ~= self.protocol then
-        return
-    end
-
-    --packet proccessing
-
-    if packet.packetType == "generic" then
-        table.insert(self.recivedData, packet)
-        self:sendRaw(packet.sourceAddress, packet.sourcePort, self.protocol, "generic_ack", packet.packetID)
-    end
-
-    if packet.packetType == "segment_init" then
-        self:_handleSegmentInit(packet)
-    end
-    if packet.packetType == "segment_data" then
-        self:_handleSegmentData(packet)
+    if self.SocketType == CLIENT then
+        event.listen("modem_message", self.on_recive)
     end
 end
 
---communication functions
-function Socket:recvFrom() -- recive data from the socket (blocking) (returns from, port, data)
-    while true do
-        if self.recivedData[1] ~= nil then
-            local packet = self.recivedData[1]
-            table.remove(self.recivedData, 1)
-            return packet.sourceAddress, packet.sourcePort, packet.data -- return from, port, data
+function Socket:close() -- close the socket
+    if self.localPort == nil then
+        error("Socket is not open")
+    end
+    self.modem.close(self.localPort) -- close the port
+
+    self.state = CLOSED -- update the state
+
+    -- reset the variables
+    self.localPort = nil
+    self.remoteAddress = nil 
+    self.remotePort = nil
+    self.connected = false
+
+    if self.SocketType == CLIENT then
+        event.ignore("modem_message", self.on_recive)
+    end
+
+    if self.SocketType == SERVER then
+        for _, connection in pairs(self.connections) do
+            connection:close()
         end
-        -- os.sleep(0.05)
-    end
-end
 
-function Socket:recv() -- recive data from the socket (blocking) (returns data)
-    while true do
-        if self.recivedData[1] ~= nil then
-            local packet = self.recivedData[1]
-            table.remove(self.recivedData, 1)
-            return packet.data -- return data
+        if self.state == LISTENING then
+            self.state = CLOSED
+            event.ignore("modem_message", self.on_recive)
         end
-        -- os.sleep(0.05)
     end
 end
 
-function Socket:send(data) -- send data to the socket
-    if self.state == "closed" then
-        self:open(self:findFreePort())
-    end
-
-    if self.protocol ~= TCP then
-        error("Socket is not TCP")
-    end
-
-    if not self.connected then
-        error("Socket is not connected")
-    end
-
-    self:sendRaw(self.remoteAddress, self.remotePort, self.protocol, "generic", data)
-    if self:getAck("generic_ack", self.ackTimeout) == nil then
-        error("Failed to send data")
-    end
-
-    return true
+function Socket:_SendRaw(targetAddress, targetPort, packetID, dataType, data) -- send raw data to a target address
+    local packet = Packet.new(packetID, self.localAddress, self.localPort, targetAddress, targetPort, dataType, data)
+    self.modem.send(targetAddress, targetPort, packet:toMessage())
 end
 
-function Socket:sendto(address, port, data)
-    if self.state == "closed" then
-        self:open(self:findFreePort())
-    end
-    
-    if self.protocol == TCP then
-        error("Socket is TCP")
-    end
-
-    self:sendRaw(address, port, self.protocol, "data", nil, data)
-end
-
-function Socket:getAck(ack, timeout) -- get ack for a packet
-    --loop over all recived packets and if the packet
+function Socket:getAck(timeout, ackType)
+    timeout = timeout or 5
     local timer = computer.uptime() + timeout
-
-    while timer > computer.uptime() do -- loop until timeout
-        for i, packet in ipairs(self.recivedData) do -- loop over all recived packets
-            if packet.packetType == ack then -- if the packet is the ack
-                table.remove(self.recivedData, i) -- remove the packet from the recivedData table
-                return packet -- return the packet
+    while computer.uptime() < timer do
+        for i, packet in pairs(self.recivedData) do
+            if packet.dataType == ACK and packet.data == ackType then
+                table.remove(self.recivedData, i)
+                return packet
             end
         end
-        -- os.sleep(0.05) -- sleep for 0.05 seconds to not use all the cpu
     end
     return nil
 end
 
--- packet handlers
-function Socket:_handleSegmentInit(packet)
-    self.lastPacketID = self.lastPacketID + 1
-    self.recivedSegmentData[self.lastPacketID] = packet
-    self:sendRaw(packet.sourceAddress, packet.sourcePort, self.protocol, "segment_init_ack", self.lastPacketID)
+-- Socket Built In Protocol Methods -------------------------------------------
+
+function Socket:setSDPAdvertStatus(state) -- set the sdp advert status of the socket
+    self.sdpAdvertEnabled = state
 end
 
-function Socket:_handleSegmentData(packet)
-    if self.recivedSegmentData[packet.data.packetID] == nil then -- if the packet is not in the recivedSegmentData table add it
-        self.recivedSegmentData[packet.data.packetID] = {packet}
-    else
-        self.recivedSegmentData[packet.data.packetID].data.data = self.recivedSegmentData[packet.data.packetID].data.data .. packet.data.data -- i know this is spaghetti af but it works so i dont care (expl: the data of the packet gets added to the data of the pervious packet)
-        self.recivedSegmentData[packet.data.packetID].data.segmentID = packet.data.segmentID -- update the segmentID to latest
+function Socket:getSocketsOnNetwork() -- get the sockets on the network
+    -- finnis
+end
+
+-- server methods -------------------------------------------
+function Socket:listen(queueSize) -- listen for connections on the socket
+    self:_check_serverOnly()
+    if self.state ~= OPEN then
+        error("Socket is not open")
     end
 
-    self:sendRaw(packet.sourceAddress, packet.sourcePort, self.protocol, "segment_data_ack", packet.data.segmentID)
+    self.state = LISTENING
+    self.connectionQueueSize = queueSize or 5
+    event.listen("modem_message", self.on_recive)
+end
 
-    if packet.data.segmentID == packet.data.segmentCount then -- if the segment is the last one
-        packet.packetType = "generic"
-        packet.data = self.recivedSegmentData[packet.data.packetID].data.data
+function Socket:stopListening() -- stop listening for connections on the socket
+    self:_check_serverOnly()
+    if self.state ~= LISTENING then
+        error("Socket is not listening")
+    end
+    self.state = OPEN
+    event.ignore("modem_message", self.on_recive)
+end
 
-        table.insert(self.recivedData, packet) -- add the data to the recivedData table
-        self.recivedSegmentData[packet.data.packetID] = nil -- remove the packet from the recivedSegmentData table
+function Socket:accept() -- [BLOCKING] queuePos: int = 1, accept a connection from the queue Retutns: Socket
+    self:_check_serverOnly()
+
+    if self.state ~= LISTENING then
+        error("Socket is not listening")
+    end
+
+    while true do
+        if self.connections[1] ~= nil then
+            local connection = self.connections[1]
+            table.remove(self.connections, 1)
+            return connection
+        end
     end
 end
 
--- return the module
-return {
-    Payload = Payload, -- the payload class for sending and receiving data
-    Socket = Socket, -- the Socket wrapper for the modem API
-    TCP = TCP, -- the TCP protocol ENUM
-    UDP = UDP, -- the UDP protocol ENUM
-}
+-- client methods -------------------------------------------
+function Socket:connect(address, port) -- connect to a socket returns: boolean (true if connected)
+    self:_check_clientOnly()
+    -- finni
+end
+
+function Socket:send(data) -- send data to the connected socket
+    self:_check_clientOnly()
+    if self.state ~= CONNECTED then
+        error("Socket is not connected")
+    end
+    self:_SendRaw(self.remoteAddress, self.remotePort, 0, PACKET, data)
+end
+
+function Socket:sendTo(addr, port, data) -- send data to a specific address
+    self:_SendRaw(addr, port, 0, PACKET, data)
+end
+
+function Socket:sendall(data) -- a function to send large data, segments the data and sends it
+    self:_check_clientOnly()
+    --finnis
+end
+-- [BLOCKING] recive data from the connected socket
+function Socket:recv()
+    self:_check_clientOnly()
+    while true do
+        if self.recivedData[1] ~= nil then
+            local packet = self.recivedData[1]
+            table.remove(self.recivedData, 1)
+            return packet.data
+        end
+    end
+end
+
+-- [BLOCKING] recive data from any socket (returns address, port, data)
+function Socket:recvfrom() 
+    while true do
+        if self.recivedData[1] ~= nil then
+            local packet = self.recivedData[1]
+            table.remove(self.recivedData, 1)
+            return packet.senderAddress, packet.senderPort, packet.data
+        end
+    end
+end
+
+-- recive handler
+function Socket:on_recive(_, targetAddress, senderAddress, port, distance, message)
+    -- turn into packet
+    if pcall(serializer.unserialize, message) == false then
+        return
+    end
+
+    local packet = Packet.fromMessage(message)
+
+    -- check if the packet is for this socket
+    if packet.targetAddress ~= self.localAddress or packet.targetPort ~= self.localPort then
+        return
+    end
+
+    -- check if the packet is a sdp packet
+    if packet.dataType == SDP_REQUEST then
+        self:_handle_sdp_request_packet(packet)
+    elseif packet.dataType == SDP_RESPONSE then
+        self:_handle_sdp_response_packet(packet)
+    end
+
+    -- check if the packet is a segment packet
+    if packet.dataType == SEGMENT_INIT then
+        self:_handle_segment_init_packet(packet)
+    elseif packet.dataType == SEGMENT_DATA then
+        self:_handle_segment_data_packet(packet)
+    end
+
+    -- check if the packet is a generic packet
+    if packet.dataType == PACKET then
+        self:_handle_generic_packet(packet)
+    end
+
+    -- check if the packet is a connection packet
+    if packet.dataType == SOCK_CONNECT_REQUEST then
+        self:on_connect_request(packet)
+    elseif packet.dataType == SOCK_CONNECT_RESPONSE then
+        self:on_connect_response(packet)
+    elseif packet.dataType == SOCK_CLOSE then
+        self:on_disconnect_request(packet)
+    end
+end
+
+-- handlers -------------------------------------------
+function Socket:_handle_generic_packet(packet)
+    table.insert(self.recivedData, packet)
+end
+
+function Socket:_handle_segment_init_packet(packet)
+    --finnis
+end
+
+function Socket:_handle_segment_data_packet(packet)
+    --finnis
+end
+
+function Socket:_handle_sdp_request_packet(packet)
+    --finnis
+end
+
+function Socket:_handle_sdp_response_packet(packet)
+    --finnis
+end
+
+function Socket:on_connect_request(packet)
+    --finnis
+end
+
+function Socket:on_connect_response(packet)
+    --finnis
+end
+
+function Socket:on_disconnect_request(packet)
+    --finnis
+end
+
+-- checks -------------------------------------------
+function Socket:_check_serverOnly()
+    if self.SocketType ~= SERVER then
+        error("This method is only for server sockets")
+    end
+end
+
+function Socket:_check_clientOnly()
+    if self.SocketType == SERVER then
+        error("This method is only for client sockets")
+    end
+end
+
+function Socket:_check_connectionClientOnly()
+    if self.SocketType ~= SERVER_CONNECTION then
+        error("This method is only for server connection sockets")
+    end
+end
+
+return Socket
