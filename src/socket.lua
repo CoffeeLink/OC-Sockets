@@ -179,7 +179,7 @@ function Socket._on_recive(self)
             self:handleConnectionAccept(payload)
 
         elseif payload.payloadType == "CONN_CLOSE" then
-            --self:handleConnectionClose(payload)
+            thread.create(function() self:handleConnectionClose(payload) end)
         end
 
         -- check if payload is for this socket
@@ -385,10 +385,12 @@ function Socket:handleConnectionClose(payload)
     if self.isServer then
         if not payload.payloadData.connected then
             -- if its not connected then its still in request stage
-            local conn, index = self:getConnectionInQueueById(payload.payloadData.connID)
+            local index, conn = self:getConnectionInQueueById(payload.payloadData.connID)
+
             if conn then
                 table.remove(self.connectionQueue, index)
             end
+
             return true
         end
         -- if its connected then its in the connection stage

@@ -6,6 +6,7 @@ local m = component.modem -- modem component
 local socket = require("socket")
 
 local c = socket.new(socket.CLIENT, "Test Client")
+c.SDP_ENABLED = false
 print("Searching for servers...")
 local addrs = c:getAllSocketsOnNetwork(2)
 for i = 1, #addrs do
@@ -13,7 +14,7 @@ for i = 1, #addrs do
 end
 
 
-local connected = c:connect(addrs[2].address, 5454)
+local connected = c:connect(addrs[1].address, 5454)
 
 if not connected then
     print("Failed to connect to server!")
@@ -21,8 +22,4 @@ if not connected then
 end
 
 print("Connected to server!")
-while true do
-    print(c:recv())
-    c:send("ping")
-end
 c:disconnect()
