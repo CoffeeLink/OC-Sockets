@@ -6,7 +6,7 @@ OC-Sockets is a wrapper for opencomputers modem API
 
 Use the installer scripts wich can be dowloaded with 
 ```bash
-wget https://raw.githubusercontent.com/aron0614/OC-Sockets/master/src/installer.lua
+wget https://raw.githubusercontent.com/CoffeeLink/OC-Sockets/master/src/installer.lua
 ```
 when downaloaded just run the script
 
